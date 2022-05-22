@@ -89,8 +89,15 @@ int main(int argc, char *argv[])
 
     thread_args = (CalcThreadArgs *)malloc(thread_count * sizeof(CalcThreadArgs));
 
-    barrier_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    barrier_cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    if(pthread_mutex_init(&barrier_mutex, NULL) != 0){
+        perror("mutex init: ");
+        return -1;
+    }
+
+    if(pthread_cond_init(&barrier_cond, NULL) != 0){
+        perror("cond init: ");
+        return -1;
+    }
 
     for(int i = 0; i < thread_count; i++){
         thread_args[i].thread_id = i;
@@ -100,8 +107,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    pthread_cond_destroy(&barrier_cond);
-    pthread_mutex_destroy(&barrier_mutex);
+   
 
     for(int i = 0; i < thread_count; i++){
         if(pthread_join(threads[i], (void*)&thread_return) != 0){
@@ -116,6 +122,9 @@ int main(int argc, char *argv[])
             return -1;
         }
     }
+
+    pthread_cond_destroy(&barrier_cond);
+    pthread_mutex_destroy(&barrier_mutex);
 
 
     //TODO
@@ -153,13 +162,10 @@ void *calculation_thread(void *arg){
     else
         pthread_cond_broadcast(&barrier_cond);
     pthread_mutex_unlock(&barrier_mutex);
-
     
-
-     for(int i = 0; i < matrix_row_col_size; i++){
+    for(int i = 0; i < matrix_row_col_size; i++){
         for(int j = thread_id; j < matrix_row_col_size; j+=thread_count){
             discrete_fourier_transform(j, i, matrix_row_col_size, &ma[j * matrix_row_col_size + i]);
-            printf("%d + %d %d\n", j, i, thread_id);
         }
     }
 
