@@ -31,6 +31,14 @@ pthread_mutex_t barrier_mutex;
 pthread_cond_t barrier_cond;
 double complex *ma;
 
+sig_atomic_t sigint_interrupt = 0;
+
+void sigint_handler(int signum){
+    if(signum == SIGINT){
+        sigint_interrupt = 1;
+    }
+}
+
 int check_arguments(int argc, char *argv[], char *matrix_file_a, char *matrix_file_b, char *output_file, int *n, int *thread_count);
 void *calculation_thread(void *arg);
 int read_matrices(const char* matrix_file_a, const char *matrix_file_b, char *matrix_a, char *matrix_b, int matrix_row_col_size);
@@ -38,23 +46,33 @@ int write_matrix(const char *output_file, double complex *matrix_c, int matrix_r
 void __matrix_multiply(char *matrix_a, char *matrix_b, double *matrix_c, int matrix_row_col_size, int column_num, int thread_count);
 void insert_columns(double* matrix_c, CalcThreadReturn *calc_thread_return, int thread_count, int thread_id, int matrix_row_col_size);
 void discrete_fourier_transform(int k, int l, int matrix_row_col_size, double complex *ma);
-
+void syncronization_barrier();
+void get_timestamp(char *timestamp_buf);
 
 int main(int argc, char *argv[])
 {
-    char matrix_file_a[100];
-    char matrix_file_b[100];
-    char output_file[100];
+    char matrix_file_a[1024];
+    char matrix_file_b[1024];
+    char output_file[1024];
+    char timestamp_buf[26];
 
     int matrix_row_col_size;
     pthread_t *threads;
     CalcThreadArgs *thread_args;
     int total_matrix_size;
 
+    double time_start, time_end, delta_time;
+
     CalcThreadReturn *thread_return = NULL;
+
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = sigint_handler;
+    sigaction(SIGINT, &act, NULL);
 
     if(check_arguments(argc, argv, matrix_file_a, matrix_file_b, output_file, &n, &thread_count) < 0){
         fprintf(stderr, "Error in arguments, usage: ./hw5 -i filePath1 -j filePath2 -o output -n 4 -m 2\n");
+        fprintf(stderr, "n should be bigger than 2, m should be bigger than 1\n");
         return -1;
     }
 
@@ -80,6 +98,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error in reading matrices\n");
         return -1;
     }
+    get_timestamp(timestamp_buf);
+    printf("%s Two matricex of size %dx%d have been read. The number of threads is %d\n", timestamp_buf, matrix_row_col_size, matrix_row_col_size, thread_count);
 
     threads = (pthread_t *)malloc(thread_count * sizeof(pthread_t));
     if(threads == NULL){
@@ -99,6 +119,8 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    time_start = clock();
+
     for(int i = 0; i < thread_count; i++){
         thread_args[i].thread_id = i;
         if(pthread_create(&threads[i], NULL, calculation_thread, (void *) (&thread_args[i])) != 0){
@@ -114,22 +136,25 @@ int main(int argc, char *argv[])
             perror("pthread_join: ");
             return -1;
         }
-        if(thread_return != NULL){
-            
-        }
-        else{
-            fprintf(stderr, "Error in thread return\n");
-            return -1;
-        }
     }
 
     pthread_cond_destroy(&barrier_cond);
     pthread_mutex_destroy(&barrier_mutex);
-
-
-    //TODO
+    free(threads);
+    free(thread_args);
+    free(thread_return);
+    free(matrix_a);
+    free(matrix_b);
+    free(matrix_c);
 
     write_matrix(output_file, ma, matrix_row_col_size);
+
+    free(ma);
+
+    time_end = clock();
+    delta_time = (time_end - time_start) / CLOCKS_PER_SEC;
+    get_timestamp(timestamp_buf);
+    printf("%s The process has written the output file. The total time spent is %lf seconds.\n", timestamp_buf, delta_time);
 
     return 0;
 }
@@ -139,6 +164,11 @@ void *calculation_thread(void *arg){
     CalcThreadReturn *thread_return = (CalcThreadReturn *)malloc(sizeof(CalcThreadReturn));
     int thread_id = thread_args->thread_id;
     int matrix_row_col_size = (int) pow(2.0, (double) n);
+    double delta_time;
+    double time_start, time_end;
+    char timestamp_buf[26];
+
+    time_start = clock();
 
     thread_return->column_count = (int) ceil((double) matrix_row_col_size / (double) thread_count);
     thread_return->matrix_c_column = (double *)malloc(thread_return->column_count * matrix_row_col_size * sizeof(double));
@@ -154,22 +184,38 @@ void *calculation_thread(void *arg){
     __matrix_multiply(matrix_a, matrix_b, thread_return->matrix_c_column, matrix_row_col_size, thread_id, thread_count);
     insert_columns(matrix_c, thread_return, thread_count, thread_id, matrix_row_col_size);
 
-    pthread_mutex_lock(&barrier_mutex);
-    arrived++;
+    time_end = clock();
+    delta_time = (time_end - time_start) / CLOCKS_PER_SEC;
+    get_timestamp(timestamp_buf);
+    printf("%s Thread %d has reached the rendezvous point in %lf seconds.\n", timestamp_buf, thread_id, delta_time);
 
-    if(arrived < thread_count)
-        pthread_cond_wait(&barrier_cond, &barrier_mutex);
-    else
-        pthread_cond_broadcast(&barrier_cond);
-    pthread_mutex_unlock(&barrier_mutex);
+    syncronization_barrier();
+
+    get_timestamp(timestamp_buf);
+    printf("%s Thread %d is advancing to the second part\n", timestamp_buf, thread_id);
     
+    time_start = clock();
+
     for(int i = 0; i < matrix_row_col_size; i++){
         for(int j = thread_id; j < matrix_row_col_size; j+=thread_count){
-            discrete_fourier_transform(j, i, matrix_row_col_size, &ma[j * matrix_row_col_size + i]);
+            discrete_fourier_transform(i, j, matrix_row_col_size, &ma[i * matrix_row_col_size + j]);
+            if(sigint_interrupt){
+                free(thread_return->matrix_c_column);
+                free(thread_return);
+                pthread_exit(NULL);
+            }
         }
     }
 
-    pthread_exit((void *)thread_return);
+    time_end = clock();
+    delta_time = (time_end - time_start) / CLOCKS_PER_SEC;
+
+    get_timestamp(timestamp_buf);
+    printf("%s Thread %d has has finished the second part in %lf seconds.\n", timestamp_buf, thread_id, delta_time);
+
+    free(thread_return->matrix_c_column);
+    free(thread_return);
+    pthread_exit(NULL);
 }
 
 int check_arguments(int argc, char *argv[], char *matrix_file_a, char *matrix_file_b, char *output_file, int *n, int *thread_count){
@@ -207,6 +253,10 @@ int check_arguments(int argc, char *argv[], char *matrix_file_a, char *matrix_fi
     }
 
     if(flag_file_a == 0 || flag_file_b == 0 || flag_output == 0 || flag_n == 0 || flag_thread_count == 0){
+        return -1;
+    }
+
+    if(*n <= 2 || *thread_count < 2){
         return -1;
     }
 
@@ -277,14 +327,10 @@ int write_matrix(const char *output_file, double complex *matrix_ft, int matrix_
     for(int i = 0; i < matrix_row_col_size; ++i){
         for(int j = 0; j < matrix_row_col_size; ++j){
             if(j == matrix_row_col_size - 1){
-                //fprintf(stderr,"%f|%fi\n", creal(matrix_ft[i * matrix_row_col_size + j]), cimag(matrix_ft[i * matrix_row_col_size + j]));
-                sprintf(value, "%.3f|%.3f\n", creal(matrix_ft[i * matrix_row_col_size + j]), cimag(matrix_ft[i * matrix_row_col_size + j]));
-                fprintf(stderr, "%lf   ", matrix_c[i * matrix_row_col_size + j]);
+                sprintf(value, "%.3f + (i %.3f)\n", creal(matrix_ft[i * matrix_row_col_size + j]), cimag(matrix_ft[i * matrix_row_col_size + j]));
             }
             else{
-                //fprintf(stderr,"%f|%fi\n", creal(matrix_ft[i * matrix_row_col_size + j]), cimag(matrix_ft[i * matrix_row_col_size + j]));
-                sprintf(value, "%.3f|%.3f,", creal(matrix_ft[i * matrix_row_col_size + j]), cimag(matrix_ft[i * matrix_row_col_size + j]));
-                fprintf(stderr, "%lf    ", matrix_c[i * matrix_row_col_size + j]);
+                sprintf(value, "%.3f + (i %.3f),", creal(matrix_ft[i * matrix_row_col_size + j]), cimag(matrix_ft[i * matrix_row_col_size + j]));
             }
             NO_EINTR(write_bytes = write(fd, value, strlen(value) * sizeof(char)));
             if(write_bytes < 0){
@@ -292,7 +338,6 @@ int write_matrix(const char *output_file, double complex *matrix_ft, int matrix_
                 return -1;
             }
         }
-        printf("\n");
     }
 
 
@@ -305,10 +350,11 @@ int write_matrix(const char *output_file, double complex *matrix_ft, int matrix_
 }
 
 void __matrix_multiply(char *matrix_a, char *matrix_b, double *matrix_c_column, int matrix_row_col_size, int column_num, int thread_count){
-    printf("%d %d %d\n", column_num, thread_count, matrix_row_col_size);
     int ind = 0;
     for(int i = 0; i < matrix_row_col_size; i++){
         for(int j = column_num; j < matrix_row_col_size; j+=thread_count){
+            if(sigint_interrupt)
+                return;
             for(int k = 0; k < matrix_row_col_size; k++){
                 matrix_c_column[ind] += (double)matrix_a[j * matrix_row_col_size + k] * (double)matrix_b[k * matrix_row_col_size + i];
             }
@@ -326,7 +372,6 @@ void insert_columns(double* matrix_c, CalcThreadReturn *calc_thread_return, int 
     }
 }
 
-//calculate fourier transform of ma
 void discrete_fourier_transform(int k, int l, int matrix_row_col_size, double complex *ma){
     double cell_value;
     double complex *mb = (double complex*)malloc(matrix_row_col_size * matrix_row_col_size * sizeof(double complex));
@@ -335,10 +380,33 @@ void discrete_fourier_transform(int k, int l, int matrix_row_col_size, double co
     for(int m = 0; m < matrix_row_col_size; ++m){
         *mb = 0;
         for(int n = 0; n < matrix_row_col_size; ++n){
+            if(sigint_interrupt)
+                return;
             cell_value = matrix_c[m * matrix_row_col_size + n];
-            *mb += (cell_value) * cexp(-2 * I * (M_PI * (double)k * (double)m / (double)matrix_row_col_size)) * cexp(-2 * I * (M_PI * (double)l * (double)n / (double)matrix_row_col_size));
-            printf("%lf\n", cell_value);
+            *mb += (cell_value) * cexp(I * (-2 * M_PI * (double)k * (double)m / (double)matrix_row_col_size)) * cexp(I * (-2 * M_PI * (double)l * (double)n / (double)matrix_row_col_size));
         }
         *ma += *mb;
     }
+
+    free(mb);
+}
+
+void syncronization_barrier(){
+    pthread_mutex_lock(&barrier_mutex);
+    arrived++;
+
+    if(arrived < thread_count)
+        pthread_cond_wait(&barrier_cond, &barrier_mutex);
+    else
+        pthread_cond_broadcast(&barrier_cond);
+    pthread_mutex_unlock(&barrier_mutex);
+}
+
+void get_timestamp(char *timestamp_buf){
+    time_t start;
+    struct tm* tm_info;
+
+    time(&start);
+    tm_info = localtime(&start);
+    strftime(timestamp_buf, 26, "%Y-%m-%d %H:%M:%S", tm_info);
 }
