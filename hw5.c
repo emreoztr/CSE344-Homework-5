@@ -154,6 +154,12 @@ int main(int argc, char *argv[])
     time_end = clock();
     delta_time = (time_end - time_start) / CLOCKS_PER_SEC;
     get_timestamp(timestamp_buf);
+
+    if(sigint_interrupt){
+        fprintf(stderr, "Interrupted by SIGINT\n");
+        return 0;
+    }
+
     printf("%s The process has written the output file. The total time spent is %lf seconds.\n", timestamp_buf, delta_time);
 
     return 0;
